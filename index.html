@@ -78,6 +78,15 @@ input[type=range]{width:100%;accent-color:var(--sky);height:32px}
 .prog{display:flex;gap:4px}
 .prog i{width:24px;height:5px;border-radius:3px;background:var(--line);display:block}
 .prog i.on{background:var(--sky)}
+.pad{width:100%;aspect-ratio:1;border-radius:18px;background:#fff;display:block;
+  box-shadow:inset 0 0 0 2px var(--line);touch-action:none;cursor:crosshair}
+.pens{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:12px 0}
+.pen{width:34px;height:34px;border-radius:50%;border:0;cursor:pointer;padding:0;
+  box-shadow:0 0 0 2px #fff, 0 0 0 3px var(--line);transition:transform .1s}
+.pen.on{transform:scale(1.18);box-shadow:0 0 0 2px #fff, 0 0 0 4px var(--ink)}
+.thumb{width:100%;border-radius:16px;display:block;box-shadow:inset 0 0 0 2px var(--line)}
+.mini{width:52px;height:52px;border-radius:11px;object-fit:cover;flex:none;
+  box-shadow:inset 0 0 0 2px var(--line)}
 @media (prefers-reduced-motion:reduce){.breath{transition-duration:.01ms}.emo:active,.tile:active,.btn:active{transform:none}}
 </style>
 </head>
@@ -142,6 +151,14 @@ const base = `classes/${CLASS_ID}`;
 const $ = (h) => { const d = document.createElement("div"); d.innerHTML = h.trim(); return d.firstElementChild; };
 const app = document.getElementById("app");
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+
+// 서버가 답이 없을 때 무한정 기다리지 않도록 하는 안전장치.
+// Firestore는 데이터베이스가 없거나 연결이 막히면 오류 대신 그냥 조용히 멈춰요.
+const T = (p, what = "서버") => Promise.race([
+  p,
+  new Promise((_, reject) => setTimeout(() =>
+    reject(new Error(`${what}에서 응답이 없어요 (12초 초과).\n\n대개 Firestore 데이터베이스가 아직 만들어지지 않았을 때 생깁니다. Firebase 콘솔 > Firestore Database 에서 데이터베이스가 있는지, 규칙이 게시되었는지 확인해 주세요.`)), 12000))
+]);
 const today = () => { const d = new Date(), p = n => String(n).padStart(2,"0");
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`; };
 const yesterday = () => { const d = new Date(Date.now()-864e5), p = n => String(n).padStart(2,"0");
@@ -204,8 +221,8 @@ onAuthStateChanged(auth, async (u) => {
   isTeacher = TEACHER_EMAILS.includes(u.email);
   render(`<p class="sub">준비하는 중…</p>`);
   try {
-    if (isTeacher) await seedRoster();
-    await loadRoster();
+    if (isTeacher) await T(seedRoster(), "명렬 등록");
+    await T(loadRoster(), "명렬 불러오기");
   } catch (e) { return renderError(e); }
   me = roster.find(s => s.uid === u.uid) || null;
   if (isTeacher && !me) return renderTeacher();
@@ -216,8 +233,11 @@ onAuthStateChanged(auth, async (u) => {
 function render(html) { app.innerHTML = ""; app.appendChild($(`<div>${html}</div>`)); }
 function renderError(e) {
   render(`<div class="card"><h2 class="h2">연결에 문제가 있어요</h2>
-    <p class="sub">${esc(e.message || e)}</p>
-    <p class="sub">Firebase 설정값과 보안 규칙을 확인해 주세요.</p></div>`);
+    <p class="sub" style="white-space:pre-wrap">${esc(e.message || e)}</p>
+    <button class="btn" id="rl" style="margin-top:14px">새로고침</button>
+    <button class="btn ghost" id="so" style="margin-top:8px">다시 로그인</button></div>`);
+  document.getElementById("rl").onclick = () => location.reload();
+  document.getElementById("so").onclick = () => signOut(auth);
 }
 
 /* ---------- 화면: 로그인 ---------- */
@@ -299,15 +319,15 @@ async function renderHome() {
 
   // 셋 중 하나가 실패해도 나머지는 그대로 보여줍니다(로딩에서 멈추지 않게).
   const [rMine, rSky, rMail] = await Promise.allSettled([
-    getDoc(doc(db, `${base}/entries`, `${user.uid}_${dt}`)),
-    getDocs(query(collection(db, `${base}/sky`), where("date", "==", dt))),
-    getDocs(query(collection(db, `${base}/mail`), where("toUid", "==", user.uid), where("approved", "==", true)))
+    T(getDoc(doc(db, `${base}/entries`, `${user.uid}_${dt}`)), "내 기록 불러오기"),
+    T(getDocs(query(collection(db, `${base}/sky`), where("date", "==", dt))), "우리 반 하늘"),
+    T(getDocs(query(collection(db, `${base}/mail`), where("toUid", "==", user.uid), where("approved", "==", true))), "우체통")
   ]);
 
   // 내 기록을 못 읽으면 진행이 불가능하니 원인을 보여주고 멈춥니다.
   if (rMine.status === "rejected") {
     render(`<div class="card"><h2 class="h2">기록을 불러오지 못했어요</h2>
-      <p class="sub">${esc(rMine.reason.message || rMine.reason)}</p>
+      <p class="sub" style="white-space:pre-wrap">${esc(rMine.reason.message || rMine.reason)}</p>
       <button class="btn" id="rt" style="margin-top:14px">다시 시도</button>
       <button class="btn ghost" id="so" style="margin-top:8px">다시 로그인</button></div>`);
     document.getElementById("rt").onclick = renderHome;
@@ -407,25 +427,101 @@ function emoGrid(sel, onPick) {
   return wrap;
 }
 
+/* ---------- 그림판 ---------- */
+const PENS = ["#22406B","#FF7A66","#FFC53D","#4FC3A1","#4A9EE8","#A78BFA","#FF9BC4","#8B6B4A"];
+
+function makePad(mount, existing, onChange) {
+  const c = document.createElement("canvas");
+  c.className = "pad";
+  mount.appendChild(c);
+  const ctx = c.getContext("2d");
+  let color = PENS[0], erasing = false, drawing = false, last = null;
+
+  // 화면 크기에 맞춰 선명하게 그려지도록 준비
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const size = Math.round(c.getBoundingClientRect().width);
+  c.width = size * dpr; c.height = size * dpr;
+  ctx.scale(dpr, dpr);
+  ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, size, size);
+  ctx.lineCap = "round"; ctx.lineJoin = "round";
+
+  if (existing) {                     // 뒤로 갔다 와도 그리던 그림이 남아 있게
+    const img = new Image();
+    img.onload = () => ctx.drawImage(img, 0, 0, size, size);
+    img.src = existing;
+  }
+
+  const pos = (e) => { const r = c.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+  const stroke = (a, b) => {
+    ctx.strokeStyle = erasing ? "#fff" : color;
+    ctx.lineWidth = erasing ? 22 : 4;
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  };
+
+  c.addEventListener("pointerdown", (e) => {
+    c.setPointerCapture(e.pointerId); drawing = true;
+    last = pos(e); stroke(last, { x: last.x + .1, y: last.y + .1 });
+  });
+  c.addEventListener("pointermove", (e) => {
+    if (!drawing) return; const p = pos(e); stroke(last, p); last = p;
+  });
+  const stop = () => { if (!drawing) return; drawing = false; onChange(exportPad()); };
+  c.addEventListener("pointerup", stop);
+  c.addEventListener("pointercancel", stop);
+  c.addEventListener("pointerleave", stop);
+
+  // 저장할 땐 320px로 줄이고 압축해서 용량을 확 낮춥니다
+  function exportPad() {
+    const o = document.createElement("canvas");
+    o.width = 320; o.height = 320;
+    const octx = o.getContext("2d");
+    octx.fillStyle = "#fff"; octx.fillRect(0, 0, 320, 320);
+    octx.drawImage(c, 0, 0, 320, 320);
+    return o.toDataURL("image/jpeg", 0.72);
+  }
+
+  return {
+    setColor: (v) => { color = v; erasing = false; },
+    setEraser: () => { erasing = true; },
+    isErasing: () => erasing,
+    clear: () => { ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, size, size); onChange(null); },
+    exportPad
+  };
+}
+
+/* ---------- 화면: 아침 체크인 ---------- */
 async function renderCheckin() {
-  const yRef = await getDoc(doc(db, `${base}/entries`, `${user.uid}_${yesterday()}`));
-  const yVow = yRef.exists() ? yRef.data().vow : "";
-  const st = { emo:null, level:3, why:"", vow:"", thanks:"", kept:null };
-  const steps = yVow ? 5 : 4;
-  let step = yVow ? 0 : 1;
+  let yVow = "";
+  try {
+    const yRef = await T(getDoc(doc(db, `${base}/entries`, `${user.uid}_${yesterday()}`)), "어제 기록");
+    yVow = yRef.exists() ? (yRef.data().vow || "") : "";
+  } catch (e) { /* 어제 기록을 못 읽어도 오늘 기록은 계속 진행합니다 */ }
+
+  const st = { emo:null, level:3, why:"", vow:"", thanks:"", kept:null, drawing:null };
+
+  // 단계 목록. '그림 그리기'를 고르면 draw 단계가 중간에 끼어듭니다.
+  const flow = [];
+  if (yVow) flow.push("vowcheck");
+  flow.push("mode", "emo", "level", "why", "plan");
+  let i = 0;
 
   const head = (title, desc) => `
     <div class="top">
       <button class="back" id="bk">← 뒤로</button>
-      <div class="prog">${Array.from({length:steps},(_,i)=>`<i class="${i <= (yVow?step:step-1) ? "on":""}"></i>`).join("")}</div>
+      <div class="prog">${flow.map((_, n) => `<i class="${n <= i ? "on" : ""}"></i>`).join("")}</div>
     </div>
     <h1 class="h1" style="margin-bottom:6px">${title}</h1>
     <p class="sub" style="margin-bottom:16px">${desc}</p>`;
 
-  const back = () => { if (step <= (yVow?0:1)) return renderHome(); step--; draw(); };
+  const back = () => { if (i === 0) return renderHome(); i--; draw(); };
+  const next = () => { i++; draw(); };
+  const bindBack = () => document.getElementById("bk").onclick = back;
 
   function draw() {
-    if (step === 0) {
+    const step = flow[i];
+
+    if (step === "vowcheck") {
       render(head("어제의 다짐, 어땠나요?", `어제 아침에 이렇게 적었어요 — "${esc(yVow)}"`) + `
         <div class="card">
           <div class="grid2" style="margin-bottom:14px">
@@ -434,17 +530,76 @@ async function renderCheckin() {
           </div>
           <p class="sub" style="margin:0">못 지켜도 괜찮아요. 지키려고 마음먹었다는 것 자체가 이미 한 걸음이에요.</p>
         </div>`);
-      document.getElementById("bk").onclick = back;
-      document.getElementById("y").onclick = () => { st.kept = true;  step = 1; draw(); };
-      document.getElementById("n").onclick = () => { st.kept = false; step = 1; draw(); };
+      bindBack();
+      document.getElementById("y").onclick = () => { st.kept = true;  next(); };
+      document.getElementById("n").onclick = () => { st.kept = false; next(); };
     }
-    else if (step === 1) {
-      render(head("지금 마음은 어느 하늘인가요?", "맞고 틀린 답은 없어요. 지금 이 순간 가장 가까운 것 하나만 골라 주세요.")
+
+    else if (step === "mode") {
+      render(head("오늘 마음을 어떻게 표현할까요?", "편한 쪽으로 고르면 돼요. 어느 쪽이든 마지막엔 마음에 이름을 붙여 볼 거예요.") + `
+        <div style="display:grid;gap:10px">
+          <button class="tile" id="card" style="padding:20px 16px">
+            <b style="font-size:16px">🃏 감정 카드 고르기</b>
+            <span>16개 카드 중에서 지금 마음과 가장 가까운 것 하나</span></button>
+          <button class="tile" id="pen" style="padding:20px 16px">
+            <b style="font-size:16px">🎨 그림으로 그리기</b>
+            <span>말로 하기 어려울 땐 색과 선으로 먼저 꺼내 봐요</span></button>
+        </div>`);
+      bindBack();
+      const setMode = (wantDraw) => {
+        const at = flow.indexOf("draw");
+        if (wantDraw && at === -1) flow.splice(i + 1, 0, "draw");
+        if (!wantDraw && at !== -1) { flow.splice(at, 1); st.drawing = null; }
+        next();
+      };
+      document.getElementById("card").onclick = () => setMode(false);
+      document.getElementById("pen").onclick  = () => setMode(true);
+    }
+
+    else if (step === "draw") {
+      render(head("지금 내 마음을 그려 보세요", "잘 그릴 필요 전혀 없어요. 색만 칠해도, 선만 그어도 훌륭한 표현이에요.") + `
+        <div class="card">
+          <div id="mount"></div>
+          <div class="pens" id="pens"></div>
+          <div class="row" style="margin-bottom:14px">
+            <button class="btn ghost sm" id="er">지우개</button>
+            <button class="btn ghost sm" id="cl">전부 지우기</button>
+          </div>
+          <button class="btn" id="nx">다 그렸어요</button>
+        </div>`);
+      bindBack();
+      const pad = makePad(document.getElementById("mount"), st.drawing, v => st.drawing = v);
+      const pens = document.getElementById("pens");
+      PENS.forEach((v, n) => {
+        const b = $(`<button class="pen ${n === 0 ? "on" : ""}" style="background:${v}"></button>`);
+        b.onclick = () => {
+          pens.querySelectorAll(".pen").forEach(x => x.classList.remove("on"));
+          b.classList.add("on"); pad.setColor(v);
+          document.getElementById("er").classList.add("ghost");
+        };
+        pens.appendChild(b);
+      });
+      document.getElementById("er").onclick = () => {
+        pad.setEraser();
+        pens.querySelectorAll(".pen").forEach(x => x.classList.remove("on"));
+      };
+      document.getElementById("cl").onclick = () => pad.clear();
+      document.getElementById("nx").onclick = () => { st.drawing = pad.exportPad(); next(); };
+    }
+
+    else if (step === "emo") {
+      const drew = flow.includes("draw");
+      render(head(
+        drew ? "이 마음에 이름을 붙인다면?" : "지금 마음은 어느 하늘인가요?",
+        drew ? "방금 그린 마음과 가장 가까운 낱말을 하나 골라 주세요."
+             : "맞고 틀린 답은 없어요. 지금 이 순간 가장 가까운 것 하나만 골라 주세요.")
+        + (drew && st.drawing ? `<img class="thumb" src="${st.drawing}" alt="내가 그린 마음" style="margin-bottom:12px">` : "")
         + `<div class="card" id="c"></div>`);
-      document.getElementById("bk").onclick = back;
-      document.getElementById("c").appendChild(emoGrid(st.emo, id => { st.emo = id; step = 2; draw(); }));
+      bindBack();
+      document.getElementById("c").appendChild(emoGrid(st.emo, id => { st.emo = id; next(); }));
     }
-    else if (step === 2) {
+
+    else if (step === "level") {
       const x = EMO[st.emo];
       render(head("그 마음이 얼마나 큰가요?", `${x.e} <b>${x.w}</b> — ${x.d}`) + `
         <div class="card">
@@ -457,19 +612,21 @@ async function renderCheckin() {
       const dots = document.getElementById("dots"), lv = document.getElementById("lv");
       const paint = () => dots.textContent = "●".repeat(+lv.value);
       paint(); lv.oninput = () => { st.level = +lv.value; paint(); };
-      document.getElementById("bk").onclick = back;
-      document.getElementById("nx").onclick = () => { step = 3; draw(); };
+      bindBack();
+      document.getElementById("nx").onclick = next;
     }
-    else if (step === 3) {
+
+    else if (step === "why") {
       render(head("왜 그런 마음이 들었을까요?", "선생님만 볼 수 있어요. 쓰기 어려우면 비워 두고 넘어가도 괜찮아요.") + `
         <div class="card">
           <textarea class="in" id="w" rows="5" placeholder="어제 늦게 자서 아침부터 몸이 무거웠어요…">${esc(st.why)}</textarea>
           <button class="btn" id="nx" style="margin-top:14px">다음</button>
         </div>`);
-      document.getElementById("bk").onclick = back;
-      document.getElementById("nx").onclick = () => { st.why = document.getElementById("w").value; step = 4; draw(); };
+      bindBack();
+      document.getElementById("nx").onclick = () => { st.why = document.getElementById("w").value; next(); };
     }
-    else if (step === 4) {
+
+    else if (step === "plan") {
       render(head("오늘 하나만 해본다면?", "크지 않아도 돼요. 내일 아침에 지켰는지 다시 물어볼게요.") + `
         <div class="card">
           <label class="lab">오늘의 다짐</label>
@@ -479,11 +636,11 @@ async function renderCheckin() {
               .map(v=>`<button class="btn ghost sm" data-v="${v}">${v}</button>`).join("")}
           </div>
           <label class="lab">오늘 기대되는 일이나 고마운 일 (선택)</label>
-          <input class="in" id="t" placeholder="점심에 미역국 나오는 날">
+          <input class="in" id="t" value="${esc(st.thanks)}" placeholder="점심에 미역국 나오는 날">
           <button class="btn sun" id="go" style="margin-top:18px">선생님께 보내기</button>
           <p class="sub" id="msg"></p>
         </div>`);
-      document.getElementById("bk").onclick = back;
+      bindBack();
       app.querySelectorAll("[data-v]").forEach(b => b.onclick = () => document.getElementById("v").value = b.dataset.v);
       document.getElementById("go").onclick = async (ev) => {
         ev.target.disabled = true; ev.target.textContent = "선생님이 편지 쓰는 중…";
@@ -497,11 +654,11 @@ async function renderCheckin() {
   }
   draw();
 }
-
 async function submit(st) {
   const r = await makeReply(st);
   const entry = { uid:user.uid, num:me.num, name:me.name, date:today(),
     emo:st.emo, level:st.level, why:st.why, vow:st.vow, thanks:st.thanks,
+    drawing:st.drawing || null,
     yesterdayKept:st.kept, reply:r.reply, flag:r.flag, createdAt:serverTimestamp() };
   await setDoc(doc(db, `${base}/entries`, `${user.uid}_${today()}`), entry);
   // 우리 반 하늘에 찍힐 점. 감정 색깔과 날짜만 담고 이름·이유는 담지 않습니다.
@@ -551,6 +708,7 @@ function renderReply(e) {
   render(`
     <h1 class="h1" style="margin-bottom:6px">선생님의 답장</h1>
     <p class="sub" style="margin-bottom:16px">오늘의 기록이 저장되었어요.</p>
+    ${e.drawing ? `<img class="thumb" src="${e.drawing}" alt="내가 그린 마음" style="margin-bottom:12px">` : ""}
     <div class="card" style="background:linear-gradient(160deg,#FFFCF2,#FFF6E0)">
       <div style="font-size:38px;margin-bottom:10px">${x.e}</div>
       <p style="font-size:15.5px;line-height:1.85;margin:0;white-space:pre-wrap">${esc(e.reply)}</p>
@@ -656,14 +814,17 @@ async function renderRecord() {
     <div class="card">
       <h2 class="h2">지난 기록 다시 보기</h2>
       ${logs.slice(0,10).map(e=>`
-        <div style="border-top:1px solid var(--line);padding:12px 0">
-          <div style="display:flex;gap:8px;align-items:center">
-            <span style="font-size:19px">${EMO[e.emo].e}</span>
-            <b style="font-size:14.5px">${EMO[e.emo].w}</b>
-            <span class="pill" style="background:#F0F7FF;color:var(--ink2)">${e.date.slice(5)}</span>
+        <div style="border-top:1px solid var(--line);padding:12px 0;display:flex;gap:11px">
+          ${e.drawing ? `<img class="mini" src="${e.drawing}" alt="그림">` : ""}
+          <div style="min-width:0;flex:1">
+            <div style="display:flex;gap:8px;align-items:center">
+              <span style="font-size:19px">${EMO[e.emo].e}</span>
+              <b style="font-size:14.5px">${EMO[e.emo].w}</b>
+              <span class="pill" style="background:#F0F7FF;color:var(--ink2)">${e.date.slice(5)}</span>
+            </div>
+            ${e.why ? `<p class="sub" style="margin-top:5px">${esc(e.why)}</p>` : ""}
+            ${e.vow ? `<p class="sub" style="margin-top:4px;color:var(--mint);font-weight:650">다짐 — ${esc(e.vow)}</p>` : ""}
           </div>
-          ${e.why ? `<p class="sub" style="margin-top:5px">${esc(e.why)}</p>` : ""}
-          ${e.vow ? `<p class="sub" style="margin-top:4px;color:var(--mint);font-weight:650">다짐 — ${esc(e.vow)}</p>` : ""}
         </div>`).join("")}
     </div>`}`);
   document.getElementById("bk").onclick = renderHome;
@@ -719,15 +880,14 @@ async function renderTeacher() {
   const dt = today();
   let tSnap, aSnap, mSnap;
   try {
-    [tSnap, aSnap, mSnap] = await Promise.all([
+    [tSnap, aSnap, mSnap] = await T(Promise.all([
       getDocs(query(collection(db, `${base}/entries`), where("date","==",dt))),
       getDocs(collection(db, `${base}/alerts`)),
       getDocs(query(collection(db, `${base}/mail`), where("approved","==",false)))
-    ]);
+    ]), "대시보드");
   } catch (e) {
     render(`<div class="card"><h2 class="h2">대시보드를 불러오지 못했어요</h2>
-      <p class="sub">${esc(e.message || e)}</p>
-      <p class="sub">보안 규칙의 교사 이메일이 설정과 같은지 확인해 보세요.</p>
+      <p class="sub" style="white-space:pre-wrap">${esc(e.message || e)}</p>
       <button class="btn" id="rt" style="margin-top:14px">다시 시도</button>
       <button class="btn ghost" id="so" style="margin-top:8px">다시 로그인</button></div>`);
     document.getElementById("rt").onclick = renderTeacher;
@@ -778,15 +938,18 @@ async function renderTeacher() {
         <div class="card">
           <h2 class="h2">오늘 올라온 기록</h2>
           ${entries.sort((a,b)=>a.num-b.num).map(e=>`
-            <div style="border-top:1px solid var(--line);padding:12px 0">
-              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-                <span style="font-size:19px">${EMO[e.emo].e}</span>
-                <b style="font-size:14.5px">${e.num}번 ${esc(e.name)}</b>
-                <span class="pill" style="background:${ZONES[EMO[e.emo].z].color};color:#fff">${EMO[e.emo].w} ${e.level}/5</span>
-                ${e.yesterdayKept === true ? `<span class="pill" style="background:#E6F7F1;color:#2E9E76">다짐 지킴</span>` : ""}
+            <div style="border-top:1px solid var(--line);padding:12px 0;display:flex;gap:11px">
+              ${e.drawing ? `<img class="mini" src="${e.drawing}" alt="그림">` : ""}
+              <div style="min-width:0;flex:1">
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                  <span style="font-size:19px">${EMO[e.emo].e}</span>
+                  <b style="font-size:14.5px">${e.num}번 ${esc(e.name)}</b>
+                  <span class="pill" style="background:${ZONES[EMO[e.emo].z].color};color:#fff">${EMO[e.emo].w} ${e.level}/5</span>
+                  ${e.yesterdayKept === true ? `<span class="pill" style="background:#E6F7F1;color:#2E9E76">다짐 지킴</span>` : ""}
+                </div>
+                ${e.why ? `<p class="sub" style="margin-top:6px">${esc(e.why)}</p>` : ""}
+                ${e.vow ? `<p class="sub" style="margin-top:4px;color:var(--mint);font-weight:650">다짐 — ${esc(e.vow)}</p>` : ""}
               </div>
-              ${e.why ? `<p class="sub" style="margin-top:6px">${esc(e.why)}</p>` : ""}
-              ${e.vow ? `<p class="sub" style="margin-top:4px;color:var(--mint);font-weight:650">다짐 — ${esc(e.vow)}</p>` : ""}
             </div>`).join("") || `<p class="sub">아직 올라온 기록이 없어요.</p>`}
         </div>`;
     }
