@@ -100,13 +100,14 @@ const firebaseConfig = {
 
 const CLASS_ID       = "2026-6-4";                 // 학년도-학년-반. 반이 바뀌면 이것만 바꾸세요
 const CLASS_LABEL    = "6학년 4반 뽀로로반";
-const TEACHER_EMAILS = ["hsb4139@gmail.com"]; // 교사 계정(여러 개 가능)
+const TEACHER_EMAILS = ["hsb4139@gmail.com"];      // 교사 계정(여러 개 가능)
 const ALLOWED_DOMAIN = "";                          // 예: "sen.go.kr" — 비워두면 모든 구글 계정 허용
 
 // 학생 명렬 — 번호순으로 한 줄에 한 명. 첫 실행 때 자동으로 등록됩니다.
 const ROSTER = [
   "권나현","김서은","김서준","김서후","김지안","류호경","방준우","백승원","백승윤","신새나",
-  "양예지","왕혜린","윤지운","윤진희","이서연","이시윤","이예진","이원준","전아정","정재우","조빈한","최원혁","최지아","허율","황설희"
+  "양예지","왕혜린","윤지운","윤진희","이서연","이시윤","이예진","이원준","전아정","정재우",
+  "조빈한","최원혁","최지아","허율","황설희"
 ];
 
 // AI 답장 서버 주소(선택). 비워두면 규칙 기반 답장이 나갑니다.
@@ -145,6 +146,14 @@ const today = () => { const d = new Date(), p = n => String(n).padStart(2,"0");
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`; };
 const yesterday = () => { const d = new Date(Date.now()-864e5), p = n => String(n).padStart(2,"0");
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`; };
+
+// '우리 반 하늘'에 찍히는 점의 문서 이름.
+// uid를 되돌릴 수 없게 섞어서, 어느 점이 누구 것인지 아무도 알 수 없게 합니다.
+const skyKey = (u, d) => {
+  let h = 5381;
+  for (const c of (u + d)) h = ((h << 5) + h + c.charCodeAt(0)) >>> 0;
+  return d + "_" + h.toString(36);
+};
 
 /* ---------- 감정 (무드미터 4사분면) ---------- */
 const ZONES = {
@@ -287,13 +296,29 @@ function renderClaim() {
 async function renderHome() {
   render(`<p class="sub">오늘의 하늘을 살펴보는 중…</p>`);
   const dt = today();
-  const [mineSnap, todaySnap, mailSnap] = await Promise.all([
+
+  // 셋 중 하나가 실패해도 나머지는 그대로 보여줍니다(로딩에서 멈추지 않게).
+  const [rMine, rSky, rMail] = await Promise.allSettled([
     getDoc(doc(db, `${base}/entries`, `${user.uid}_${dt}`)),
-    getDocs(query(collection(db, `${base}/entries`), where("date", "==", dt))),
+    getDocs(query(collection(db, `${base}/sky`), where("date", "==", dt))),
     getDocs(query(collection(db, `${base}/mail`), where("toUid", "==", user.uid), where("approved", "==", true)))
   ]);
+
+  // 내 기록을 못 읽으면 진행이 불가능하니 원인을 보여주고 멈춥니다.
+  if (rMine.status === "rejected") {
+    render(`<div class="card"><h2 class="h2">기록을 불러오지 못했어요</h2>
+      <p class="sub">${esc(rMine.reason.message || rMine.reason)}</p>
+      <button class="btn" id="rt" style="margin-top:14px">다시 시도</button>
+      <button class="btn ghost" id="so" style="margin-top:8px">다시 로그인</button></div>`);
+    document.getElementById("rt").onclick = renderHome;
+    document.getElementById("so").onclick = () => signOut(auth);
+    return;
+  }
+
+  const mineSnap = rMine.value;
   const done = mineSnap.exists();
-  const sky = todaySnap.docs.map(d => d.data());
+  const sky = rSky.status === "fulfilled" ? rSky.value.docs.map(d => d.data()) : [];
+  const mailCount = rMail.status === "fulfilled" ? rMail.value.size : 0;
   const cnt = { yellow:0, green:0, red:0, blue:0 };
   sky.forEach(e => EMO[e.emo] && cnt[EMO[e.emo].z]++);
   const h = new Date().getHours();
@@ -334,7 +359,7 @@ async function renderHome() {
       <button class="tile" data-go="tool"><b>마음 튼튼 도구함</b><span>마음이 시끄러울 때 쓰는 세 가지</span></button>
       <button class="tile" data-go="dict"><b>감정 낱말 사전</b><span>내 기분에 정확한 이름 붙이기</span></button>
       <button class="tile" data-go="rec"><b>내 마음 지나온 길</b><span>기록이 쌓이면 보이는 것들</span></button>
-      <button class="tile" data-go="mail"><b>마음 우체통 ${mailSnap.size ? `<span class="pill" style="background:var(--sun);color:#5A4000">${mailSnap.size}</span>` : ""}</b><span>친구에게 고마움 전하기</span></button>
+      <button class="tile" data-go="mail"><b>마음 우체통 ${mailCount ? `<span class="pill" style="background:var(--sun);color:#5A4000">${mailCount}</span>` : ""}</b><span>친구에게 고마움 전하기</span></button>
     </div>
 
     <div class="card" style="margin-top:12px;background:#FFF8E8">
@@ -479,6 +504,11 @@ async function submit(st) {
     emo:st.emo, level:st.level, why:st.why, vow:st.vow, thanks:st.thanks,
     yesterdayKept:st.kept, reply:r.reply, flag:r.flag, createdAt:serverTimestamp() };
   await setDoc(doc(db, `${base}/entries`, `${user.uid}_${today()}`), entry);
+  // 우리 반 하늘에 찍힐 점. 감정 색깔과 날짜만 담고 이름·이유는 담지 않습니다.
+  try {
+    await setDoc(doc(db, `${base}/sky`, skyKey(user.uid, today())),
+      { date: today(), emo: st.emo });
+  } catch (e) { /* 점이 안 찍혀도 기록은 이미 저장됐으니 그냥 넘어갑니다 */ }
   if (r.flag === "watch" || r.flag === "urgent") {
     await addDoc(collection(db, `${base}/alerts`), { kind:r.flag, uid:user.uid, name:me.name,
       num:me.num, text:st.why, emo:st.emo, date:today(), createdAt:serverTimestamp() });
@@ -687,11 +717,23 @@ async function renderMail() {
 async function renderTeacher() {
   render(`<p class="sub">우리 반 기록을 불러오는 중…</p>`);
   const dt = today();
-  const [tSnap, aSnap, mSnap] = await Promise.all([
-    getDocs(query(collection(db, `${base}/entries`), where("date","==",dt))),
-    getDocs(collection(db, `${base}/alerts`)),
-    getDocs(query(collection(db, `${base}/mail`), where("approved","==",false)))
-  ]);
+  let tSnap, aSnap, mSnap;
+  try {
+    [tSnap, aSnap, mSnap] = await Promise.all([
+      getDocs(query(collection(db, `${base}/entries`), where("date","==",dt))),
+      getDocs(collection(db, `${base}/alerts`)),
+      getDocs(query(collection(db, `${base}/mail`), where("approved","==",false)))
+    ]);
+  } catch (e) {
+    render(`<div class="card"><h2 class="h2">대시보드를 불러오지 못했어요</h2>
+      <p class="sub">${esc(e.message || e)}</p>
+      <p class="sub">보안 규칙의 교사 이메일이 설정과 같은지 확인해 보세요.</p>
+      <button class="btn" id="rt" style="margin-top:14px">다시 시도</button>
+      <button class="btn ghost" id="so" style="margin-top:8px">다시 로그인</button></div>`);
+    document.getElementById("rt").onclick = renderTeacher;
+    document.getElementById("so").onclick = () => signOut(auth);
+    return;
+  }
   const entries = tSnap.docs.map(d=>({ id:d.id, ...d.data() }));
   const alerts  = aSnap.docs.map(d=>({ id:d.id, ...d.data() })).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
   const mail    = mSnap.docs.map(d=>({ id:d.id, ...d.data() }));
