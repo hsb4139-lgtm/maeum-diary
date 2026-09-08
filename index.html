@@ -318,10 +318,12 @@ async function renderHome() {
   const dt = today();
 
   // 셋 중 하나가 실패해도 나머지는 그대로 보여줍니다(로딩에서 멈추지 않게).
-  const [rMine, rSky, rMail] = await Promise.allSettled([
+  const [rMine, rSky, rMail, rNote] = await Promise.allSettled([
     T(getDoc(doc(db, `${base}/entries`, `${user.uid}_${dt}`)), "내 기록 불러오기"),
     T(getDocs(query(collection(db, `${base}/sky`), where("date", "==", dt))), "우리 반 하늘"),
-    T(getDocs(query(collection(db, `${base}/mail`), where("toUid", "==", user.uid), where("approved", "==", true))), "우체통")
+    T(getDocs(query(collection(db, `${base}/mail`), where("toUid", "==", user.uid), where("approved", "==", true))), "우체통"),
+    T(Promise.all(Array.from({ length: 7 }, (_, k) => shiftDate(dt, -k))
+        .map(d => getDoc(doc(db, `${base}/entries`, `${user.uid}_${d}`)))), "선생님 한마디")
   ]);
 
   // 내 기록을 못 읽으면 진행이 불가능하니 원인을 보여주고 멈춥니다.
@@ -339,6 +341,10 @@ async function renderHome() {
   const done = mineSnap.exists();
   const sky = rSky.status === "fulfilled" ? rSky.value.docs.map(d => d.data()) : [];
   const mailCount = rMail.status === "fulfilled" ? rMail.value.size : 0;
+  const notes = (rNote.status === "fulfilled" ? rNote.value : [])
+    .filter(s => s.exists() && s.data().teacherNote)
+    .map(s => s.data())
+    .sort((a, b) => b.date.localeCompare(a.date));
   const cnt = { yellow:0, green:0, red:0, blue:0 };
   sky.forEach(e => EMO[e.emo] && cnt[EMO[e.emo].z]++);
   const h = new Date().getHours();
@@ -364,6 +370,16 @@ async function renderHome() {
                친구 ${sky.length}명이 마음을 올렸어요 · 누구 것인지는 아무도 몰라요</div>`}
       </div>
     </div>
+
+    ${notes.length ? `
+    <div class="card" style="margin-bottom:12px;background:linear-gradient(160deg,#FFFCF2,#FFF3DC)">
+      <h2 class="h2">선생님이 남긴 말 💌</h2>
+      ${notes.map(n => `
+        <div class="note" style="margin-top:10px;background:#fff">
+          <p class="sub" style="margin:0;font-weight:700">${prettyDate(n.date)}에 쓴 마음에</p>
+          <p style="margin:6px 0 0;font-size:15px;line-height:1.8;white-space:pre-wrap">${esc(n.teacherNote)}</p>
+        </div>`).join("")}
+    </div>` : ""}
 
     <div class="card" style="margin-bottom:12px">
       <h2 class="h2">오늘 아침의 마음</h2>
@@ -824,6 +840,10 @@ async function renderRecord() {
             </div>
             ${e.why ? `<p class="sub" style="margin-top:5px">${esc(e.why)}</p>` : ""}
             ${e.vow ? `<p class="sub" style="margin-top:4px;color:var(--mint);font-weight:650">다짐 — ${esc(e.vow)}</p>` : ""}
+            ${e.teacherNote ? `<div class="note" style="margin-top:7px;background:#FFF8E8">
+              <p class="sub" style="margin:0;font-weight:750;color:#8A6A1F">선생님 한마디</p>
+              <p style="margin:4px 0 0;font-size:13.5px;line-height:1.7;white-space:pre-wrap">${esc(e.teacherNote)}</p>
+            </div>` : ""}
           </div>
         </div>`).join("")}
     </div>`}`);
@@ -929,23 +949,73 @@ async function renderTeacher() {
     draw();
   }
 
-  // 기록 한 줄(그림·감정·이유·다짐)을 그리는 공통 조각
+  // 기록 한 줄(그림·감정·이유·다짐·선생님 한마디)을 그리는 공통 조각
   const entryRow = (e, who) => `
-    <div style="border-top:1px solid var(--line);padding:12px 0;display:flex;gap:11px">
-      ${e.drawing ? `<img class="mini" src="${e.drawing}" alt="그림">` : ""}
-      <div style="min-width:0;flex:1">
-        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <span style="font-size:19px">${EMO[e.emo]?.e || "•"}</span>
-          <b style="font-size:14.5px">${who}</b>
-          <span class="pill" style="background:${ZONES[EMO[e.emo]?.z || "green"].color};color:#fff">${EMO[e.emo]?.w || "?"} ${e.level}/5</span>
-          ${e.yesterdayKept === true ? `<span class="pill" style="background:#E6F7F1;color:#2E9E76">다짐 지킴</span>` : ""}
-          ${e.yesterdayKept === false ? `<span class="pill" style="background:#F0F7FF;color:var(--ink2)">다짐 못 지킴</span>` : ""}
+    <div style="border-top:1px solid var(--line);padding:12px 0">
+      <div style="display:flex;gap:11px">
+        ${e.drawing ? `<img class="mini" src="${e.drawing}" alt="그림">` : ""}
+        <div style="min-width:0;flex:1">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <span style="font-size:19px">${EMO[e.emo]?.e || "•"}</span>
+            <b style="font-size:14.5px">${who}</b>
+            <span class="pill" style="background:${ZONES[EMO[e.emo]?.z || "green"].color};color:#fff">${EMO[e.emo]?.w || "?"} ${e.level}/5</span>
+            ${e.yesterdayKept === true ? `<span class="pill" style="background:#E6F7F1;color:#2E9E76">다짐 지킴</span>` : ""}
+            ${e.yesterdayKept === false ? `<span class="pill" style="background:#F0F7FF;color:var(--ink2)">다짐 못 지킴</span>` : ""}
+          </div>
+          ${e.why ? `<p class="sub" style="margin-top:6px">${esc(e.why)}</p>` : ""}
+          ${e.thanks ? `<p class="sub" style="margin-top:4px">고마운 일 — ${esc(e.thanks)}</p>` : ""}
+          ${e.vow ? `<p class="sub" style="margin-top:4px;color:var(--mint);font-weight:650">다짐 — ${esc(e.vow)}</p>` : ""}
         </div>
-        ${e.why ? `<p class="sub" style="margin-top:6px">${esc(e.why)}</p>` : ""}
-        ${e.thanks ? `<p class="sub" style="margin-top:4px">고마운 일 — ${esc(e.thanks)}</p>` : ""}
-        ${e.vow ? `<p class="sub" style="margin-top:4px;color:var(--mint);font-weight:650">다짐 — ${esc(e.vow)}</p>` : ""}
+      </div>
+      ${e.teacherNote ? `
+        <div class="note" style="margin-top:9px;background:#FFF8E8">
+          <p class="sub" style="margin:0;font-weight:750;color:#8A6A1F">선생님 한마디</p>
+          <p style="margin:5px 0 0;font-size:14px;line-height:1.7;white-space:pre-wrap">${esc(e.teacherNote)}</p>
+        </div>` : ""}
+      <div data-slot="${e.uid}_${e.date}">
+        <button class="btn ghost sm" style="margin-top:8px" data-note="${e.uid}_${e.date}">
+          ${e.teacherNote ? "한마디 고치기" : "한마디 남기기"}</button>
       </div>
     </div>`;
+
+  // 한마디 작성 버튼 연결. 저장하면 학생은 다음에 앱을 열 때 보게 됩니다.
+  function bindNotes(scope, entryList, refresh) {
+    scope.querySelectorAll("[data-note]").forEach(btn => btn.onclick = () => {
+      const id = btn.dataset.note;
+      const cur = (entryList || []).find(x => `${x.uid}_${x.date}` === id);
+      const slot = scope.querySelector(`[data-slot="${id}"]`);
+      slot.innerHTML = `
+        <textarea class="in" rows="3" style="margin-top:8px"
+          placeholder="짧아도 좋아요. 아이가 내일 아침에 읽게 돼요.">${esc(cur?.teacherNote || "")}</textarea>
+        <div class="row" style="margin-top:8px">
+          <button class="btn sm" data-save="1">보내기</button>
+          <button class="btn ghost sm" data-cancel="1">취소</button>
+          ${cur?.teacherNote ? `<button class="btn ghost sm" data-erase="1">지우기</button>` : ""}
+        </div>
+        <p class="sub" data-msg="1"></p>`;
+      const ta = slot.querySelector("textarea");
+      ta.focus();
+      const write = async (text) => {
+        slot.querySelector("[data-save]").disabled = true;
+        try {
+          await T(updateDoc(doc(db, `${base}/entries`, id),
+            { teacherNote: text, noteAt: serverTimestamp() }), "한마디 저장");
+          if (cur) cur.teacherNote = text;
+          refresh();
+        } catch (err) {
+          slot.querySelector("[data-msg]").innerHTML = `<span class="err">${esc(err.message || err)}</span>`;
+          slot.querySelector("[data-save]").disabled = false;
+        }
+      };
+      slot.querySelector("[data-save]").onclick = () => {
+        const v = ta.value.trim();
+        if (v) write(v);
+      };
+      slot.querySelector("[data-cancel]").onclick = () => refresh();
+      const er = slot.querySelector("[data-erase]");
+      if (er) er.onclick = () => write("");
+    });
+  }
 
   function draw() {
     render(`
@@ -1010,6 +1080,7 @@ async function renderTeacher() {
       document.getElementById("pv").onclick = () => loadDay(shiftDate(viewDate, -1));
       document.getElementById("nx").onclick = () => { if (!isToday) loadDay(shiftDate(viewDate, 1)); };
       if (!isToday) document.getElementById("td").onclick = () => loadDay(dt);
+      bindNotes(body, dayEntries, draw);
     }
 
     /* ── 살펴볼 학생 ───────────────────────────────── */
@@ -1104,6 +1175,7 @@ async function renderTeacher() {
           ${logs.map(e => entryRow(e, prettyDate(e.date))).join("")}
         </div>`}`;
       document.getElementById("bk2").onclick = () => { pupil = null; draw(); };
+      bindNotes(body, pupilLogs, draw);
     }
   }
 
