@@ -112,11 +112,14 @@ const CLASS_LABEL    = "6학년 4반 뽀로로반";
 const TEACHER_EMAILS = ["hsb4139@gmail.com"];      // 교사 계정(여러 개 가능)
 const ALLOWED_DOMAIN = "";                          // 예: "sen.go.kr" — 비워두면 모든 구글 계정 허용
 
-// 학생 명렬 — 번호순으로 한 줄에 한 명. 첫 실행 때 자동으로 등록됩니다.
+// 학생 명렬 — 번호순으로 한 줄에 한 명.
+// 이름을 뒤에 추가하고 선생님 계정으로 접속하면 새 번호만 자동으로 등록돼요.
+// (이미 등록된 번호는 절대 덮어쓰지 않으니 기존 기록은 안전합니다)
 const ROSTER = [
   "권나현","김서은","김서준","김서후","김지안","류호경","방준우","백승원","백승윤","신새나",
   "양예지","왕혜린","윤지운","윤진희","이서연","이시윤","이예진","이원준","전아정","정재우",
-  "조빈한","최원혁","최지아","허율","황설희"
+  "조빈한","최원혁","최지아","허율","황설희",
+  "홍홍이"   // 26번 — 선생님이 학생 화면을 직접 체험해 보기 위한 자리
 ];
 
 // AI 답장 서버 주소(선택). 비워두면 규칙 기반 답장이 나갑니다.
@@ -202,12 +205,18 @@ const EMO = Object.fromEntries(EMOTIONS.map(x => [x.id, x]));
 /* ---------- 상태 ---------- */
 let user = null, me = null, isTeacher = false, roster = [];
 
-/* ---------- 최초 1회: 명렬 심기 ---------- */
+/* ---------- 명렬 심기: 없는 번호만 새로 만듭니다 ---------- */
 async function seedRoster() {
   const snap = await getDocs(collection(db, `${base}/roster`));
-  if (!snap.empty) return;
-  await Promise.all(ROSTER.map((name, i) =>
-    setDoc(doc(db, `${base}/roster`, String(i + 1)), { num: i + 1, name, uid: null, email: null })));
+  const have = new Set(snap.docs.map(d => d.id));
+  // 이미 있는 번호는 절대 건드리지 않습니다(연결된 계정과 기록이 날아가지 않도록)
+  const todo = ROSTER
+    .map((name, i) => ({ num: i + 1, name }))
+    .filter(x => !have.has(String(x.num)));
+  if (!todo.length) return;
+  await Promise.all(todo.map(x =>
+    setDoc(doc(db, `${base}/roster`, String(x.num)),
+      { num: x.num, name: x.name, uid: null, email: null })));
 }
 async function loadRoster() {
   const snap = await getDocs(collection(db, `${base}/roster`));
@@ -225,7 +234,9 @@ onAuthStateChanged(auth, async (u) => {
     await T(loadRoster(), "명렬 불러오기");
   } catch (e) { return renderError(e); }
   me = roster.find(s => s.uid === u.uid) || null;
-  if (isTeacher && !me) return renderTeacher();
+  // 교사는 학생 자리를 겸하고 있어도 대시보드로 먼저 들어갑니다.
+  // 학생 화면은 대시보드 상단의 '내 화면' 버튼으로 오갈 수 있어요.
+  if (isTeacher) return renderTeacher();
   if (!me) return renderClaim();
   renderHome();
 });
@@ -282,7 +293,7 @@ function renderClaim() {
   const free = roster.filter(s => !s.uid);
   render(`
     <div class="top"><h1 class="h1">누구인가요?</h1>
-      <button class="back" id="out">나가기</button></div>
+      <button class="back" id="out">${isTeacher ? "대시보드로" : "나가기"}</button></div>
     <div class="card">
       <p class="sub" style="margin:0 0 16px">
         딱 한 번만 고르면 돼요. 고른 뒤에는 바꿀 수 없고, 다른 사람이 내 번호로 들어올 수도 없어요.</p>
@@ -295,7 +306,7 @@ function renderClaim() {
       <p class="sub" id="msg"></p>
       ${free.length === 0 ? `<p class="sub">남은 자리가 없어요. 선생님께 말해 주세요.</p>` : ""}
     </div>`);
-  document.getElementById("out").onclick = () => signOut(auth);
+  document.getElementById("out").onclick = () => isTeacher ? renderTeacher() : signOut(auth);
   document.getElementById("go").onclick = async () => {
     const num = document.getElementById("sel").value;
     if (!num) return;
@@ -1021,7 +1032,8 @@ async function renderTeacher() {
     render(`
       <div class="top"><h1 class="h1">교사 대시보드</h1>
         <div class="row">
-          ${me ? `<button class="back" id="hm">내 화면</button>` : ""}
+          ${me ? `<button class="back" id="hm">내 화면</button>`
+                : `<button class="back" id="join">학생으로 체험</button>`}
           <button class="back" id="out">나가기</button></div></div>
       <div class="row" style="margin-bottom:14px">
         ${[["day","기록"],["alerts",`살펴볼 학생${alerts.length?` ${alerts.length}`:""}`],
@@ -1031,6 +1043,7 @@ async function renderTeacher() {
       <div id="body"></div>`);
     document.getElementById("out").onclick = () => signOut(auth);
     if (me) document.getElementById("hm").onclick = renderHome;
+    else document.getElementById("join").onclick = renderClaim;
     app.querySelectorAll("[data-tab]").forEach(b => b.onclick = () => {
       tab = b.dataset.tab; pupil = null;
       if (tab === "day" && dayEntries === null && !dayErr) return loadDay(viewDate);
