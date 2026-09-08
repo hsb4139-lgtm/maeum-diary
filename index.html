@@ -875,13 +875,23 @@ async function renderMail() {
 }
 
 /* ---------- 화면: 교사 대시보드 ---------- */
+const shiftDate = (d, n) => {
+  const [y, m, dd] = d.split("-").map(Number);
+  const x = new Date(y, m - 1, dd + n), p = v => String(v).padStart(2, "0");
+  return `${x.getFullYear()}-${p(x.getMonth() + 1)}-${p(x.getDate())}`;
+};
+const WEEK = ["일","월","화","수","목","금","토"];
+const prettyDate = (d) => {
+  const [y, m, dd] = d.split("-").map(Number);
+  return `${m}월 ${dd}일 (${WEEK[new Date(y, m - 1, dd).getDay()]})`;
+};
+
 async function renderTeacher() {
   render(`<p class="sub">우리 반 기록을 불러오는 중…</p>`);
   const dt = today();
-  let tSnap, aSnap, mSnap;
+  let aSnap, mSnap;
   try {
-    [tSnap, aSnap, mSnap] = await T(Promise.all([
-      getDocs(query(collection(db, `${base}/entries`), where("date","==",dt))),
+    [aSnap, mSnap] = await T(Promise.all([
       getDocs(collection(db, `${base}/alerts`)),
       getDocs(query(collection(db, `${base}/mail`), where("approved","==",false)))
     ]), "대시보드");
@@ -894,16 +904,49 @@ async function renderTeacher() {
     document.getElementById("so").onclick = () => signOut(auth);
     return;
   }
-  const entries = tSnap.docs.map(d=>({ id:d.id, ...d.data() }));
-  const alerts  = aSnap.docs.map(d=>({ id:d.id, ...d.data() })).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
-  const mail    = mSnap.docs.map(d=>({ id:d.id, ...d.data() }));
-  const cnt = { yellow:0, green:0, red:0, blue:0 };
-  entries.forEach(e => EMO[e.emo] && cnt[EMO[e.emo].z]++);
-  const doneNums = new Set(entries.map(e=>e.num));
-  const missing  = roster.filter(s => !doneNums.has(s.num));
-  const heavy    = cnt.red + cnt.blue > cnt.yellow + cnt.green;
+  const alerts = aSnap.docs.map(d=>({ id:d.id, ...d.data() })).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+  const mail   = mSnap.docs.map(d=>({ id:d.id, ...d.data() }));
 
-  let tab = "today";
+  let tab = "day";
+  let viewDate = dt, dayEntries = null, dayErr = "";   // 날짜별 보기
+  let pupil = null, pupilLogs = null;                  // 학생별 보기
+
+  async function loadDay(d) {
+    viewDate = d; dayEntries = null; dayErr = ""; draw();
+    try {
+      const s = await T(getDocs(query(collection(db, `${base}/entries`), where("date","==",d))), "기록");
+      dayEntries = s.docs.map(x => x.data());
+    } catch (e) { dayEntries = []; dayErr = e.message || String(e); }
+    draw();
+  }
+  async function loadPupil(s) {
+    pupil = s; pupilLogs = null; draw();
+    try {
+      const snap = await T(getDocs(query(collection(db, `${base}/entries`), where("uid","==",s.uid))), "학생 기록");
+      pupilLogs = snap.docs.map(d => d.data())
+        .sort((a,b) => b.date.localeCompare(a.date)).slice(0, 30);
+    } catch (e) { pupilLogs = []; }
+    draw();
+  }
+
+  // 기록 한 줄(그림·감정·이유·다짐)을 그리는 공통 조각
+  const entryRow = (e, who) => `
+    <div style="border-top:1px solid var(--line);padding:12px 0;display:flex;gap:11px">
+      ${e.drawing ? `<img class="mini" src="${e.drawing}" alt="그림">` : ""}
+      <div style="min-width:0;flex:1">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <span style="font-size:19px">${EMO[e.emo]?.e || "•"}</span>
+          <b style="font-size:14.5px">${who}</b>
+          <span class="pill" style="background:${ZONES[EMO[e.emo]?.z || "green"].color};color:#fff">${EMO[e.emo]?.w || "?"} ${e.level}/5</span>
+          ${e.yesterdayKept === true ? `<span class="pill" style="background:#E6F7F1;color:#2E9E76">다짐 지킴</span>` : ""}
+          ${e.yesterdayKept === false ? `<span class="pill" style="background:#F0F7FF;color:var(--ink2)">다짐 못 지킴</span>` : ""}
+        </div>
+        ${e.why ? `<p class="sub" style="margin-top:6px">${esc(e.why)}</p>` : ""}
+        ${e.thanks ? `<p class="sub" style="margin-top:4px">고마운 일 — ${esc(e.thanks)}</p>` : ""}
+        ${e.vow ? `<p class="sub" style="margin-top:4px;color:var(--mint);font-weight:650">다짐 — ${esc(e.vow)}</p>` : ""}
+      </div>
+    </div>`;
+
   function draw() {
     render(`
       <div class="top"><h1 class="h1">교사 대시보드</h1>
@@ -911,49 +954,65 @@ async function renderTeacher() {
           ${me ? `<button class="back" id="hm">내 화면</button>` : ""}
           <button class="back" id="out">나가기</button></div></div>
       <div class="row" style="margin-bottom:14px">
-        ${[["today","오늘"],["alerts",`살펴볼 학생${alerts.length?` ${alerts.length}`:""}`],
+        ${[["day","기록"],["alerts",`살펴볼 학생${alerts.length?` ${alerts.length}`:""}`],
            ["mail",`쪽지${mail.length?` ${mail.length}`:""}`],["roster","학생 명단"]]
           .map(([k,l])=>`<button class="btn sm ${tab===k?"":"ghost"}" data-tab="${k}">${l}</button>`).join("")}
       </div>
       <div id="body"></div>`);
     document.getElementById("out").onclick = () => signOut(auth);
     if (me) document.getElementById("hm").onclick = renderHome;
-    app.querySelectorAll("[data-tab]").forEach(b => b.onclick = () => { tab = b.dataset.tab; draw(); });
+    app.querySelectorAll("[data-tab]").forEach(b => b.onclick = () => {
+      tab = b.dataset.tab; pupil = null;
+      if (tab === "day" && dayEntries === null && !dayErr) return loadDay(viewDate);
+      draw();
+    });
     const body = document.getElementById("body");
 
-    if (tab === "today") {
-      const total = entries.length || 1;
+    /* ── 기록 (날짜별) ─────────────────────────────── */
+    if (tab === "day") {
+      const joined = roster.filter(s => s.uid).length;
+      const cnt = { yellow:0, green:0, red:0, blue:0 };
+      (dayEntries || []).forEach(e => EMO[e.emo] && cnt[EMO[e.emo].z]++);
+      const doneNums = new Set((dayEntries || []).map(e => e.num));
+      const missing = roster.filter(s => s.uid && !doneNums.has(s.num));
+      const heavy = cnt.red + cnt.blue > cnt.yellow + cnt.green;
+      const isToday = viewDate === dt;
+
       body.innerHTML = `
         <div class="card" style="margin-bottom:10px">
-          <h2 class="h2">오늘 아침 ${entries.length} / ${roster.filter(s=>s.uid).length}명 제출</h2>
-          <div class="bar">${Object.entries(cnt).map(([z,n])=>
-            `<div style="flex:${n||0.06};background:${ZONES[z].color}">${n||""}</div>`).join("")}</div>
-          <p class="sub">노랑 ${cnt.yellow} · 초록 ${cnt.green} · 빨강 ${cnt.red} · 파랑 ${cnt.blue}
-            ${heavy ? " — 오늘은 반 전체가 무거운 편이에요. 아침 활동을 짧고 가볍게 가져가 보세요." : ""}</p>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px">
+            <button class="btn ghost sm" id="pv">◀ 어제</button>
+            <b style="font-size:16px;letter-spacing:-.02em">${prettyDate(viewDate)}</b>
+            <button class="btn ghost sm" id="nx" ${isToday ? "disabled" : ""}>다음 ▶</button>
+          </div>
+          ${!isToday ? `<button class="btn ghost sm" id="td" style="width:100%;margin-top:6px">오늘로 돌아가기</button>` : ""}
         </div>
+        ${dayEntries === null ? `<p class="sub">불러오는 중…</p>` : `
         <div class="card" style="margin-bottom:10px">
-          <h2 class="h2">아직 안 낸 학생</h2>
+          <h2 class="h2">${dayEntries.length} / ${joined}명 제출</h2>
+          ${dayEntries.length ? `
+            <div class="bar">${Object.entries(cnt).map(([z,n])=>
+              `<div style="flex:${n||0.06};background:${ZONES[z].color}">${n||""}</div>`).join("")}</div>
+            <p class="sub">노랑 ${cnt.yellow} · 초록 ${cnt.green} · 빨강 ${cnt.red} · 파랑 ${cnt.blue}
+              ${heavy ? " — 이날은 반 전체가 무거운 편이었어요." : ""}</p>`
+            : `<p class="sub">${dayErr ? esc(dayErr) : "이날은 올라온 기록이 없어요."}</p>`}
+        </div>
+        ${dayEntries.length ? `
+        <div class="card" style="margin-bottom:10px">
+          <h2 class="h2">안 낸 학생</h2>
           <p class="sub">${missing.length ? missing.map(s=>`${s.num} ${esc(s.name)}`).join(" · ") : "모두 제출했어요."}</p>
         </div>
         <div class="card">
-          <h2 class="h2">오늘 올라온 기록</h2>
-          ${entries.sort((a,b)=>a.num-b.num).map(e=>`
-            <div style="border-top:1px solid var(--line);padding:12px 0;display:flex;gap:11px">
-              ${e.drawing ? `<img class="mini" src="${e.drawing}" alt="그림">` : ""}
-              <div style="min-width:0;flex:1">
-                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-                  <span style="font-size:19px">${EMO[e.emo].e}</span>
-                  <b style="font-size:14.5px">${e.num}번 ${esc(e.name)}</b>
-                  <span class="pill" style="background:${ZONES[EMO[e.emo].z].color};color:#fff">${EMO[e.emo].w} ${e.level}/5</span>
-                  ${e.yesterdayKept === true ? `<span class="pill" style="background:#E6F7F1;color:#2E9E76">다짐 지킴</span>` : ""}
-                </div>
-                ${e.why ? `<p class="sub" style="margin-top:6px">${esc(e.why)}</p>` : ""}
-                ${e.vow ? `<p class="sub" style="margin-top:4px;color:var(--mint);font-weight:650">다짐 — ${esc(e.vow)}</p>` : ""}
-              </div>
-            </div>`).join("") || `<p class="sub">아직 올라온 기록이 없어요.</p>`}
-        </div>`;
+          <h2 class="h2">올라온 기록</h2>
+          ${[...dayEntries].sort((a,b)=>a.num-b.num).map(e => entryRow(e, `${e.num}번 ${esc(e.name)}`)).join("")}
+        </div>` : ""}`}`;
+
+      document.getElementById("pv").onclick = () => loadDay(shiftDate(viewDate, -1));
+      document.getElementById("nx").onclick = () => { if (!isToday) loadDay(shiftDate(viewDate, 1)); };
+      if (!isToday) document.getElementById("td").onclick = () => loadDay(dt);
     }
 
+    /* ── 살펴볼 학생 ───────────────────────────────── */
     if (tab === "alerts") {
       body.innerHTML = `<div class="card"><h2 class="h2">먼저 다가가면 좋을 신호</h2>
         <p class="sub" style="margin-bottom:10px">학생이 직접 보낸 도움 요청과, 기록에서 감지된 신호예요.</p>
@@ -974,6 +1033,7 @@ async function renderTeacher() {
       });
     }
 
+    /* ── 쪽지 ─────────────────────────────────────── */
     if (tab === "mail") {
       body.innerHTML = `<div class="card"><h2 class="h2">전달 기다리는 쪽지 ${mail.length}장</h2>
         <p class="sub" style="margin-bottom:10px">아침에 한 번 훑고 전달해 주세요.</p>
@@ -991,21 +1051,63 @@ async function renderTeacher() {
         await deleteDoc(doc(db, `${base}/mail`, b.dataset.no)); renderTeacher(); });
     }
 
-    if (tab === "roster") {
+    /* ── 학생 명단 · 학생별 기록 ────────────────────── */
+    if (tab === "roster" && !pupil) {
       body.innerHTML = `<div class="card"><h2 class="h2">학생 명단</h2>
-        <p class="sub" style="margin-bottom:12px">계정을 잘못 연결한 학생은 연결을 풀어 주면 다시 고를 수 있어요.</p>
+        <p class="sub" style="margin-bottom:12px">이름을 누르면 그 학생의 지난 기록이 열려요.</p>
         ${roster.map(s=>`
           <div style="border-top:1px solid var(--line);padding:12px 0;display:flex;justify-content:space-between;align-items:center;gap:10px">
-            <div><b style="font-size:14.5px">${s.num}번 ${esc(s.name)}</b>
-              <p class="sub" style="margin:3px 0 0">${s.uid ? esc(s.email) : "아직 연결 전"}</p></div>
+            <button ${s.uid ? `data-see="${s.num}"` : ""} style="background:none;border:0;padding:0;font:inherit;color:inherit;text-align:left;cursor:${s.uid?"pointer":"default"};min-width:0">
+              <b style="font-size:14.5px">${s.num}번 ${esc(s.name)}${s.uid ? " ›" : ""}</b>
+              <p class="sub" style="margin:3px 0 0">${s.uid ? esc(s.email) : "아직 연결 전"}</p>
+            </button>
             ${s.uid ? `<button class="btn ghost sm" data-rst="${s.num}">연결 풀기</button>` : ""}
           </div>`).join("")}</div>`;
+      body.querySelectorAll("[data-see]").forEach(b => b.onclick = () =>
+        loadPupil(roster.find(s => s.num === Number(b.dataset.see))));
       body.querySelectorAll("[data-rst]").forEach(b => b.onclick = async () => {
         await updateDoc(doc(db, `${base}/roster`, b.dataset.rst), { uid:null, email:null });
         await loadRoster(); renderTeacher(); });
     }
+
+    if (tab === "roster" && pupil) {
+      const logs = pupilLogs;
+      const cnt = { yellow:0, green:0, red:0, blue:0 }, tally = {};
+      (logs || []).forEach(e => { if (EMO[e.emo]) { cnt[EMO[e.emo].z]++; tally[e.emo] = (tally[e.emo]||0)+1; } });
+      const topId = Object.keys(tally).sort((a,b)=>tally[b]-tally[a])[0];
+      const kept = (logs || []).filter(e => e.yesterdayKept === true).length;
+      const tried = (logs || []).filter(e => e.yesterdayKept != null).length;
+
+      body.innerHTML = `
+        <button class="back" id="bk2">← 명단으로</button>
+        <h2 class="h1" style="font-size:22px;margin:6px 0 14px">${pupil.num}번 ${esc(pupil.name)}</h2>
+        ${logs === null ? `<p class="sub">불러오는 중…</p>`
+        : logs.length === 0 ? `<div class="card"><p class="sub" style="margin:0">아직 남긴 기록이 없어요.</p></div>` : `
+        <div class="card" style="margin-bottom:10px">
+          <h2 class="h2">최근 ${logs.length}일의 흐름</h2>
+          <div class="strip" style="margin-top:12px">
+            ${[...logs].reverse().map(e=>`<span class="sq" title="${e.date} ${EMO[e.emo]?.w||""}"
+              style="background:${ZONES[EMO[e.emo]?.z||"green"].color};opacity:${(.35+(e.level||3)*.13).toFixed(2)}"></span>`).join("")}
+          </div>
+          <p class="sub" style="margin-top:12px">왼쪽이 오래된 날, 오른쪽이 최근이에요. 색이 진할수록 그 감정이 강했던 날입니다.</p>
+        </div>
+        <div class="card" style="margin-bottom:10px">
+          <h2 class="h2">한눈에 보기</h2>
+          <div class="bar">${Object.entries(cnt).map(([z,n])=>
+            `<div style="flex:${n||0.06};background:${ZONES[z].color}">${n||""}</div>`).join("")}</div>
+          <div class="note">가장 자주 찾아온 마음은 <b>${EMO[topId].e} ${EMO[topId].w}</b>이에요.</div>
+          <div class="note" style="margin-top:8px">기분 좋은 아침 ${cnt.yellow+cnt.green}번, 무거운 아침 ${cnt.red+cnt.blue}번.</div>
+          ${tried ? `<div class="note" style="margin-top:8px">다짐을 돌아본 ${tried}번 중 <b>${kept}번</b> 지켰어요.</div>` : ""}
+        </div>
+        <div class="card">
+          <h2 class="h2">날짜별 기록</h2>
+          ${logs.map(e => entryRow(e, prettyDate(e.date))).join("")}
+        </div>`}`;
+      document.getElementById("bk2").onclick = () => { pupil = null; draw(); };
+    }
   }
-  draw();
+
+  loadDay(dt);
 }
 </script>
 </body>
